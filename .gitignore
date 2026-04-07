@@ -1,0 +1,5 @@
+.venv/
+data/
+outputs/
+outputs_*/
+qa_system/__pycache__/
