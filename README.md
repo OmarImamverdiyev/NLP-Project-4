@@ -3,8 +3,15 @@
 Datasets: https://drive.google.com/drive/folders/1NYBJmfx9RETVmYFXmHjYObUJQNuz7fZB?usp=sharing 
 
 # Task 1
+```bash
 .venv\Scripts\python evaluate_sentiment140_bert.py --csv-path Sentiment140_v2.csv --model-name textattack/bert-base-uncased-SST-2 --max-rows 100000 --batch-size 64 --max-length 64 --output-dir outputs_task1_sentiment_100k
+```
 
+# Task 1 - Azeri Model
+```bash
+.venv\Scripts\python evaluate_sentiment140_bert.py --csv-path dataset.csv --label-column label --text-column text --model-name StartZer0/az-sentiment-bert --max-rows 100000 --batch-size 64 --max-length 64 --output-dir outputs_task1_extended_az_dataset_100k
+
+```
 
 # Task 2 - static
 .venv\Scripts\python -m qa_system.train --embedding-mode static --download-squad --train-limit 4380 --dev-limit 634 --epochs 2 --batch-size 16 --lowercase-static --output-dir outputs_task2_static_5pct_6pct

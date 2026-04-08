@@ -4,3 +4,4 @@ outputs/
 outputs_*/
 qa_system/__pycache__/
 dataset.csv
+dataset_balanced_100k.csv
