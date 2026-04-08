@@ -7,3 +7,6 @@ dataset.csv
 dataset_balanced_100k.csv
 UI/artifacts/model_store/
 UI/artifacts/logs/
+UI/venv/
+venv/
+.venv/
