@@ -25,14 +25,21 @@ def bundle_config_exists(path: str | Path) -> bool:
     return (directory / "config.json").exists()
 
 
-def resolve_load_source(source_name: str, namespace: str, root: Path | None = None) -> str:
+def resolve_load_source(
+    source_name: str,
+    namespace: str,
+    root: Path | None = None,
+    *,
+    prefer_cached_bundle: bool = True,
+) -> str:
     candidate_path = Path(source_name)
     if candidate_path.exists():
         return str(candidate_path.resolve())
 
-    cached_bundle = bundle_dir(namespace=namespace, source_name=source_name, root=root)
-    if bundle_config_exists(cached_bundle):
-        return str(cached_bundle.resolve())
+    if prefer_cached_bundle:
+        cached_bundle = bundle_dir(namespace=namespace, source_name=source_name, root=root)
+        if bundle_config_exists(cached_bundle):
+            return str(cached_bundle.resolve())
 
     return source_name
 
@@ -44,8 +51,10 @@ def persist_pretrained_bundle(
     namespace: str,
     root: Path | None = None,
     extra_metadata: dict[str, Any] | None = None,
+    target_name: str | None = None,
 ) -> Path:
-    target_dir = bundle_dir(namespace=namespace, source_name=source_name, root=root)
+    storage_name = target_name or source_name
+    target_dir = bundle_dir(namespace=namespace, source_name=storage_name, root=root)
     target_dir.mkdir(parents=True, exist_ok=True)
 
     # On Windows, repeatedly rewriting an already-loaded safetensors bundle can
@@ -63,6 +72,7 @@ def persist_pretrained_bundle(
     metadata = {
         "label": source_name,
         "source_name": source_name,
+        "target_name": storage_name,
         "namespace": namespace,
         "path": str(target_dir.resolve()),
     }

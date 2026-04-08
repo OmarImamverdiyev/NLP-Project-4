@@ -68,7 +68,7 @@ def build_qa_command(
     dev_limit: int | None = None,
     batch_size: int = 8,
     epochs: int = 2,
-    learning_rate: float = 2e-3,
+    learning_rate: float | None = None,
     dropout: float = 0.2,
     embedding_dim: int = 100,
     hidden_size: int = 100,
@@ -98,8 +98,6 @@ def build_qa_command(
         str(batch_size),
         "--epochs",
         str(epochs),
-        "--learning-rate",
-        str(learning_rate),
         "--dropout",
         str(dropout),
         "--embedding-dim",
@@ -119,6 +117,9 @@ def build_qa_command(
         "--seed",
         str(seed),
     ]
+
+    if learning_rate is not None:
+        parts.extend(["--learning-rate", str(learning_rate)])
 
     if train_file:
         parts.extend(["--train-file", train_file])

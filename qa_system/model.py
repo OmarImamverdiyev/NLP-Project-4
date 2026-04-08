@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
-from transformers import AutoModel
+from transformers import AutoModel, AutoModelForQuestionAnswering
 
 
 class HighwayNetwork(nn.Module):
@@ -106,6 +106,7 @@ class BiDAFQuestionAnswering(nn.Module):
         bert_model_name: str = "bert-base-uncased",
         freeze_bert: bool = True,
         pretrained_embeddings: torch.Tensor | None = None,
+        bert_architecture: str = "legacy_bidaf",
     ):
         super().__init__()
         if embedding_mode not in {"static", "bert"}:
@@ -113,6 +114,7 @@ class BiDAFQuestionAnswering(nn.Module):
 
         self.embedding_mode = embedding_mode
         self.freeze_bert = freeze_bert
+        self.bert_architecture = bert_architecture
 
         if embedding_mode == "static":
             if vocab_size is None:
@@ -123,21 +125,31 @@ class BiDAFQuestionAnswering(nn.Module):
                     raise ValueError("pretrained_embeddings has incompatible shape.")
                 self.token_embedding.weight.data.copy_(pretrained_embeddings)
         else:
-            self.bert = AutoModel.from_pretrained(bert_model_name)
-            bert_hidden_size = int(self.bert.config.hidden_size)
-            self.bert_projection = nn.Linear(bert_hidden_size, embedding_dim)
-            if freeze_bert:
-                for parameter in self.bert.parameters():
-                    parameter.requires_grad = False
+            if bert_architecture == "joint_qa_transformers":
+                self.bert = AutoModelForQuestionAnswering.from_pretrained(bert_model_name)
+                if freeze_bert:
+                    for name, parameter in self.bert.named_parameters():
+                        if not name.startswith("qa_outputs."):
+                            parameter.requires_grad = False
+            elif bert_architecture == "legacy_bidaf":
+                self.bert = AutoModel.from_pretrained(bert_model_name)
+                bert_hidden_size = int(self.bert.config.hidden_size)
+                self.bert_projection = nn.Linear(bert_hidden_size, embedding_dim)
+                if freeze_bert:
+                    for parameter in self.bert.parameters():
+                        parameter.requires_grad = False
+            else:
+                raise ValueError(f"Unsupported bert_architecture: {bert_architecture}")
 
         self.dropout = nn.Dropout(dropout)
-        self.highway = HighwayNetwork(embedding_dim)
-        self.contextual_encoder = SequenceEncoder(embedding_dim, hidden_size, dropout)
-        self.attention_flow = AttentionFlow(hidden_size * 2)
-        self.modeling_encoder = SequenceEncoder(hidden_size * 8, hidden_size, dropout)
-        self.output_encoder = SequenceEncoder(hidden_size * 2, hidden_size, dropout)
-        self.start_projection = nn.Linear(hidden_size * 10, 1)
-        self.end_projection = nn.Linear(hidden_size * 10, 1)
+        if embedding_mode == "static" or bert_architecture == "legacy_bidaf":
+            self.highway = HighwayNetwork(embedding_dim)
+            self.contextual_encoder = SequenceEncoder(embedding_dim, hidden_size, dropout)
+            self.attention_flow = AttentionFlow(hidden_size * 2)
+            self.modeling_encoder = SequenceEncoder(hidden_size * 8, hidden_size, dropout)
+            self.output_encoder = SequenceEncoder(hidden_size * 2, hidden_size, dropout)
+            self.start_projection = nn.Linear(hidden_size * 10, 1)
+            self.end_projection = nn.Linear(hidden_size * 10, 1)
 
     def embed_tokens(self, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
         if self.embedding_mode == "static":
@@ -157,11 +169,31 @@ class BiDAFQuestionAnswering(nn.Module):
 
     def forward(
         self,
-        context_ids: torch.Tensor,
-        context_mask: torch.Tensor,
-        question_ids: torch.Tensor,
-        question_mask: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+        context_ids: torch.Tensor | None = None,
+        context_mask: torch.Tensor | None = None,
+        question_ids: torch.Tensor | None = None,
+        question_mask: torch.Tensor | None = None,
+        input_ids: torch.Tensor | None = None,
+        attention_mask: torch.Tensor | None = None,
+        token_type_ids: torch.Tensor | None = None,
+        start_positions: torch.Tensor | None = None,
+        end_positions: torch.Tensor | None = None,
+    ):
+        if self.embedding_mode == "bert" and self.bert_architecture == "joint_qa_transformers":
+            model_inputs = {
+                "input_ids": input_ids,
+                "attention_mask": attention_mask,
+                "start_positions": start_positions,
+                "end_positions": end_positions,
+                "return_dict": True,
+            }
+            if token_type_ids is not None and getattr(self.bert.config, "type_vocab_size", 0):
+                model_inputs["token_type_ids"] = token_type_ids
+            return self.bert(**model_inputs)
+
+        if context_ids is None or context_mask is None or question_ids is None or question_mask is None:
+            raise ValueError("Legacy/static forward requires context and question tensors.")
+
         context_embeddings = self.embed_tokens(context_ids, context_mask)
         question_embeddings = self.embed_tokens(question_ids, question_mask)
 

@@ -69,25 +69,32 @@ def compute_squad_metrics(predictions: dict[str, str], references: dict[str, lis
 def select_best_span(
     start_logits: torch.Tensor,
     end_logits: torch.Tensor,
-    valid_length: int,
+    valid_length: int | None,
     max_answer_length: int,
+    candidate_mask: torch.Tensor | None = None,
 ) -> tuple[int, int]:
     best_start = 0
     best_end = 0
     best_score = float("-inf")
+    total_length = int(start_logits.size(0))
 
-    for start_index in range(valid_length):
-        last_end = min(valid_length, start_index + max_answer_length)
-        end_slice = end_logits[start_index:last_end]
-        if end_slice.numel() == 0:
-            continue
-        relative_end = int(torch.argmax(end_slice).item())
-        end_index = start_index + relative_end
-        score = float(start_logits[start_index].item() + end_logits[end_index].item())
-        if score > best_score:
-            best_score = score
-            best_start = start_index
-            best_end = end_index
+    if candidate_mask is not None:
+        normalized_mask = candidate_mask.to(dtype=torch.bool, device="cpu")
+        candidate_indices = [index for index, flag in enumerate(normalized_mask.tolist()) if flag]
+    else:
+        normalized_length = total_length if valid_length is None else min(int(valid_length), total_length)
+        candidate_indices = list(range(normalized_length))
+
+    for start_index in candidate_indices:
+        last_end = min(total_length, start_index + max_answer_length)
+        for end_index in range(start_index, last_end):
+            if candidate_mask is not None and not bool(normalized_mask[end_index].item()):
+                continue
+            score = float(start_logits[start_index].item() + end_logits[end_index].item())
+            if score > best_score:
+                best_score = score
+                best_start = start_index
+                best_end = end_index
 
     return best_start, best_end
 

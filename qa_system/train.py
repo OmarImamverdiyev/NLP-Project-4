@@ -7,11 +7,12 @@ from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, get_linear_schedule_with_warmup
 
 from UI.services.artifacts import write_json, write_run_manifest
 from UI.services.hf_store import persist_pretrained_bundle, resolve_load_source
@@ -25,6 +26,7 @@ from qa_system.data import (
     load_glove_subset,
     load_squad_examples,
     pad_qa_batch,
+    resolve_bert_max_length,
 )
 from qa_system.metrics import compute_squad_metrics, extract_answer_text, select_best_span
 from qa_system.model import BiDAFQuestionAnswering
@@ -42,7 +44,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dev-limit", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--epochs", type=int, default=2)
-    parser.add_argument("--learning-rate", type=float, default=2e-3)
+    parser.add_argument("--learning-rate", type=float, default=None)
     parser.add_argument("--dropout", type=float, default=0.2)
     parser.add_argument("--embedding-dim", type=int, default=100)
     parser.add_argument("--hidden-size", type=int, default=100)
@@ -61,9 +63,23 @@ def parse_args() -> argparse.Namespace:
 
 def set_seed(seed: int) -> None:
     random.seed(seed)
+    np.random.seed(seed)
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+    if torch.backends.cudnn.is_available():
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+
+
+def build_backbone_snapshot_name(
+    output_dir: Path,
+    source_name: str,
+    created_at: datetime,
+) -> str:
+    source_label = Path(str(source_name)).name or str(source_name)
+    timestamp = created_at.strftime("%Y%m%dT%H%M%SZ")
+    return f"{output_dir.name}__{timestamp}__{source_label}"
 
 
 def move_batch_to_device(batch: dict[str, object], device: torch.device) -> dict[str, object]:
@@ -71,6 +87,21 @@ def move_batch_to_device(batch: dict[str, object], device: torch.device) -> dict
     for key, value in batch.items():
         moved[key] = value.to(device) if torch.is_tensor(value) else value
     return moved
+
+
+def resolve_learning_rate(args: argparse.Namespace) -> float:
+    if args.learning_rate is not None:
+        return float(args.learning_rate)
+    if args.embedding_mode == "bert":
+        return 3e-5
+    return 2e-3
+
+
+def is_joint_bert_model(model: BiDAFQuestionAnswering) -> bool:
+    return (
+        model.embedding_mode == "bert"
+        and getattr(model, "bert_architecture", "") == "joint_qa_transformers"
+    )
 
 
 def resolve_data_files(args: argparse.Namespace) -> tuple[Path, Path]:
@@ -138,8 +169,14 @@ def prepare_dataloaders(args: argparse.Namespace):
             args.bert_model_name,
             namespace="qa_backbones",
             root=project_root,
+            prefer_cached_bundle=False,
         )
         tokenizer = AutoTokenizer.from_pretrained(resolved_bert_source, use_fast=True)
+        bert_max_length = resolve_bert_max_length(
+            context_max_length=args.context_max_length,
+            question_max_length=args.question_max_length,
+            tokenizer=tokenizer,
+        )
         train_features, skipped_train = build_bert_features(
             train_examples,
             tokenizer,
@@ -160,11 +197,13 @@ def prepare_dataloaders(args: argparse.Namespace):
             "dropout": args.dropout,
             "bert_model_name": args.bert_model_name,
             "freeze_bert": args.freeze_bert,
+            "bert_architecture": "joint_qa_transformers",
         }
         extra_state = {
             "tokenizer_name": args.bert_model_name,
             "resolved_bert_source": resolved_bert_source,
             "tokenizer": tokenizer,
+            "bert_max_length": bert_max_length,
         }
 
     train_dataset = QADataset(train_features)
@@ -221,28 +260,44 @@ def evaluate(
     with torch.no_grad():
         for batch in loader:
             batch = move_batch_to_device(batch, device)
-            start_logits, end_logits = model(
-                context_ids=batch["context_ids"],
-                context_mask=batch["context_mask"],
-                question_ids=batch["question_ids"],
-                question_mask=batch["question_mask"],
-            )
-            loss = compute_loss(
-                start_logits,
-                end_logits,
-                batch["start_positions"],
-                batch["end_positions"],
-            )
+            if is_joint_bert_model(model):
+                outputs = model(
+                    input_ids=batch["input_ids"],
+                    attention_mask=batch["attention_mask"],
+                    token_type_ids=batch["token_type_ids"],
+                    start_positions=batch["start_positions"],
+                    end_positions=batch["end_positions"],
+                )
+                start_logits = outputs.start_logits
+                end_logits = outputs.end_logits
+                loss = outputs.loss
+            else:
+                start_logits, end_logits = model(
+                    context_ids=batch["context_ids"],
+                    context_mask=batch["context_mask"],
+                    question_ids=batch["question_ids"],
+                    question_mask=batch["question_mask"],
+                )
+                loss = compute_loss(
+                    start_logits,
+                    end_logits,
+                    batch["start_positions"],
+                    batch["end_positions"],
+                )
             total_loss += float(loss.item())
             total_batches += 1
 
             for row, metadata in enumerate(batch["metadata"]):
-                valid_length = int(batch["context_mask"][row].sum().item())
+                candidate_mask = batch["context_token_mask"][row].detach().cpu() if "context_token_mask" in batch else None
+                valid_length = None
+                if candidate_mask is None:
+                    valid_length = int(batch["context_mask"][row].sum().item())
                 start_index, end_index = select_best_span(
                     start_logits[row].detach().cpu(),
                     end_logits[row].detach().cpu(),
                     valid_length=valid_length,
                     max_answer_length=max_answer_length,
+                    candidate_mask=candidate_mask,
                 )
                 prediction = extract_answer_text(
                     metadata["context"],
@@ -259,6 +314,7 @@ def evaluate(
 
 
 def train(args: argparse.Namespace) -> dict[str, object]:
+    args.learning_rate = resolve_learning_rate(args)
     set_seed(args.seed)
     project_root = Path(__file__).resolve().parents[1]
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -269,10 +325,21 @@ def train(args: argparse.Namespace) -> dict[str, object]:
         runtime_model_kwargs["bert_model_name"] = str(extra_state.get("resolved_bert_source", args.bert_model_name))
 
     model = BiDAFQuestionAnswering(**runtime_model_kwargs).to(device)
+    optimizer_kwargs = {"lr": args.learning_rate}
+    if is_joint_bert_model(model):
+        optimizer_kwargs["eps"] = 1e-8
     optimizer = AdamW(
         [parameter for parameter in model.parameters() if parameter.requires_grad],
-        lr=args.learning_rate,
+        **optimizer_kwargs,
     )
+    scheduler = None
+    if is_joint_bert_model(model):
+        total_steps = max(len(train_loader) * args.epochs, 1)
+        scheduler = get_linear_schedule_with_warmup(
+            optimizer,
+            num_warmup_steps=0,
+            num_training_steps=total_steps,
+        )
 
     history: list[dict[str, float | int]] = []
     for epoch in range(1, args.epochs + 1):
@@ -283,20 +350,34 @@ def train(args: argparse.Namespace) -> dict[str, object]:
         for batch in train_loader:
             batch = move_batch_to_device(batch, device)
             optimizer.zero_grad(set_to_none=True)
-            start_logits, end_logits = model(
-                context_ids=batch["context_ids"],
-                context_mask=batch["context_mask"],
-                question_ids=batch["question_ids"],
-                question_mask=batch["question_mask"],
-            )
-            loss = compute_loss(
-                start_logits,
-                end_logits,
-                batch["start_positions"],
-                batch["end_positions"],
-            )
+            if is_joint_bert_model(model):
+                outputs = model(
+                    input_ids=batch["input_ids"],
+                    attention_mask=batch["attention_mask"],
+                    token_type_ids=batch["token_type_ids"],
+                    start_positions=batch["start_positions"],
+                    end_positions=batch["end_positions"],
+                )
+                loss = outputs.loss
+            else:
+                start_logits, end_logits = model(
+                    context_ids=batch["context_ids"],
+                    context_mask=batch["context_mask"],
+                    question_ids=batch["question_ids"],
+                    question_mask=batch["question_mask"],
+                )
+                loss = compute_loss(
+                    start_logits,
+                    end_logits,
+                    batch["start_positions"],
+                    batch["end_positions"],
+                )
             loss.backward()
+            if is_joint_bert_model(model):
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
+            if scheduler is not None:
+                scheduler.step()
 
             running_loss += float(loss.item())
             running_batches += 1
@@ -330,6 +411,7 @@ def train(args: argparse.Namespace) -> dict[str, object]:
         key: str(value) if isinstance(value, Path) else value
         for key, value in vars(args).items()
     }
+    run_created_at = datetime.now(timezone.utc)
     checkpoint_path = args.output_dir / f"bidaf_{args.embedding_mode}.pt"
     local_backbone_dir = None
     if args.embedding_mode == "bert":
@@ -340,9 +422,17 @@ def train(args: argparse.Namespace) -> dict[str, object]:
             source_name=args.bert_model_name,
             namespace="qa_backbones",
             root=project_root,
+            target_name=build_backbone_snapshot_name(
+                args.output_dir,
+                args.bert_model_name,
+                run_created_at,
+            ),
             extra_metadata={
                 "task": "qa",
                 "saved_from_script": "qa_system.train",
+                "run_name": args.output_dir.name,
+                "created_at_utc": run_created_at.isoformat(),
+                "resolved_source": str(extra_state.get("resolved_bert_source", args.bert_model_name)),
             },
         )
         serializable_extra_state["local_backbone_dir"] = str(local_backbone_dir.resolve())
@@ -387,7 +477,7 @@ def train(args: argparse.Namespace) -> dict[str, object]:
             "task": "qa",
             "label": f"QA | {args.embedding_mode} | {args.output_dir.name}",
             "run_name": args.output_dir.name,
-            "created_at_utc": datetime.now(timezone.utc).isoformat(),
+            "created_at_utc": run_created_at.isoformat(),
             "output_dir": args.output_dir,
             "artifacts": {
                 "checkpoint_path": checkpoint_path,

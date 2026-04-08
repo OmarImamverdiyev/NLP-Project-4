@@ -387,7 +387,13 @@ def render_qa_panel() -> None:
     hidden_size = c4.number_input("Hidden size", min_value=32, max_value=1024, value=100 if embedding_mode == "static" else 64, step=4)
 
     d1, d2, d3 = st.columns(3)
-    learning_rate = d1.number_input("Learning rate", min_value=0.000001, max_value=1.0, value=0.002, format="%.6f")
+    learning_rate = d1.number_input(
+        "Learning rate",
+        min_value=0.000001,
+        max_value=1.0,
+        value=0.00003 if embedding_mode == "bert" else 0.002,
+        format="%.6f",
+    )
     dropout = d2.number_input("Dropout", min_value=0.0, max_value=0.9, value=0.2, step=0.05)
     max_answer_length = d3.number_input("Max answer length", min_value=1, max_value=128, value=30, step=1)
 
@@ -409,7 +415,7 @@ def render_qa_panel() -> None:
             bert_model_name = st.text_input("Custom backbone name", value="bert-base-uncased")
         else:
             bert_model_name = next(item["value"] for item in qa_backbones if item["label"] == selected_backbone)
-        freeze_bert = st.checkbox("Freeze BERT backbone", value=True)
+        freeze_bert = st.checkbox("Freeze BERT backbone", value=False)
 
     command = build_qa_command(
         embedding_mode=embedding_mode,

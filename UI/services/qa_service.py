@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -10,7 +11,7 @@ from transformers import AutoTokenizer
 
 from UI.services.artifacts import load_json, project_root
 from UI.services.hf_store import persist_pretrained_bundle, resolve_load_source
-from qa_system.data import TOKEN_PATTERN, UNK_IDX
+from qa_system.data import TOKEN_PATTERN, UNK_IDX, resolve_bert_max_length
 from qa_system.metrics import extract_answer_text, select_best_span
 from qa_system.model import BiDAFQuestionAnswering
 
@@ -87,49 +88,62 @@ def _prepare_bert_inputs(
     question_max_length: int,
     device: torch.device,
 ) -> dict[str, Any]:
-    context_encoding = tokenizer(
+    max_length = resolve_bert_max_length(
+        context_max_length=context_max_length,
+        question_max_length=question_max_length,
+        tokenizer=tokenizer,
+    )
+
+    encoding = tokenizer(
+        question,
         context,
-        add_special_tokens=False,
-        truncation=True,
-        max_length=context_max_length,
-        return_attention_mask=False,
+        add_special_tokens=True,
+        truncation="only_second",
+        max_length=max_length,
+        return_attention_mask=True,
         return_offsets_mapping=True,
     )
-    question_encoding = tokenizer(
-        question,
-        add_special_tokens=False,
-        truncation=True,
-        max_length=question_max_length,
-        return_attention_mask=False,
-        return_offsets_mapping=False,
-    )
 
-    context_ids = context_encoding.get("input_ids", [])
-    question_ids = question_encoding.get("input_ids", [])
-    if not context_ids or not question_ids:
+    input_ids = encoding.get("input_ids", [])
+    if not input_ids:
+        raise ValueError("The BERT tokenizer produced an empty input sequence.")
+
+    sequence_ids = encoding.sequence_ids()
+    context_token_mask = [sequence_id == 1 for sequence_id in sequence_ids]
+    question_token_count = sum(sequence_id == 0 for sequence_id in sequence_ids)
+    if question_token_count == 0 or not any(context_token_mask):
         raise ValueError("Both context and question must contain at least one token after tokenization.")
 
-    context_tensor = torch.tensor([context_ids], dtype=torch.long, device=device)
-    question_tensor = torch.tensor([question_ids], dtype=torch.long, device=device)
-    context_mask = torch.ones_like(context_tensor, dtype=torch.bool)
-    question_mask = torch.ones_like(question_tensor, dtype=torch.bool)
+    token_type_ids = encoding.get("token_type_ids", [0] * len(input_ids))
+    input_tensor = torch.tensor([input_ids], dtype=torch.long, device=device)
+    attention_mask = torch.tensor([encoding["attention_mask"]], dtype=torch.bool, device=device)
+    token_type_tensor = torch.tensor([token_type_ids], dtype=torch.long, device=device)
+    context_token_mask_tensor = torch.tensor([context_token_mask], dtype=torch.bool, device=device)
 
     return {
-        "context_ids": context_tensor,
-        "question_ids": question_tensor,
-        "context_mask": context_mask,
-        "question_mask": question_mask,
-        "offsets": [tuple(offset) for offset in context_encoding["offset_mapping"]],
+        "input_ids": input_tensor,
+        "attention_mask": attention_mask,
+        "token_type_ids": token_type_tensor,
+        "context_token_mask": context_token_mask_tensor,
+        "offsets": [tuple(int(value) for value in offset) for offset in encoding["offset_mapping"]],
+        "question_tokens_used": question_token_count,
+        "context_tokens_used": int(sum(context_token_mask)),
     }
+
+
+def _uses_joint_bert_qa(loaded: LoadedQAModel) -> bool:
+    checkpoint = loaded.metadata.get("checkpoint", {})
+    model_kwargs = checkpoint.get("model_kwargs", {})
+    return str(model_kwargs.get("bert_architecture", "")) == "joint_qa_transformers"
 
 
 def load_qa_model(
     checkpoint_path: str | Path,
     *,
-    root: Path | None = None,
+    root: str | Path | None = None,
     device: str | None = None,
 ) -> LoadedQAModel:
-    current_root = (root or project_root()).resolve()
+    current_root = Path(root).resolve() if root is not None else project_root().resolve()
     checkpoint_file = Path(checkpoint_path).resolve()
     checkpoint = torch.load(checkpoint_file, map_location="cpu")
     model_kwargs = dict(checkpoint["model_kwargs"])
@@ -191,14 +205,46 @@ def predict_answer(
     question: str,
 ) -> dict[str, Any]:
     if loaded.embedding_mode == "bert":
-        batch = _prepare_bert_inputs(
-            context,
-            question,
-            loaded.tokenizer,
-            context_max_length=loaded.context_max_length,
-            question_max_length=loaded.question_max_length,
-            device=loaded.device,
-        )
+        if _uses_joint_bert_qa(loaded):
+            batch = _prepare_bert_inputs(
+                context,
+                question,
+                loaded.tokenizer,
+                context_max_length=loaded.context_max_length,
+                question_max_length=loaded.question_max_length,
+                device=loaded.device,
+            )
+        else:
+            context_encoding = loaded.tokenizer(
+                context,
+                add_special_tokens=False,
+                truncation=True,
+                max_length=loaded.context_max_length,
+                return_attention_mask=False,
+                return_offsets_mapping=True,
+            )
+            question_encoding = loaded.tokenizer(
+                question,
+                add_special_tokens=False,
+                truncation=True,
+                max_length=loaded.question_max_length,
+                return_attention_mask=False,
+                return_offsets_mapping=False,
+            )
+            context_ids = context_encoding.get("input_ids", [])
+            question_ids = question_encoding.get("input_ids", [])
+            if not context_ids or not question_ids:
+                raise ValueError("Both context and question must contain at least one token after tokenization.")
+
+            context_tensor = torch.tensor([context_ids], dtype=torch.long, device=loaded.device)
+            question_tensor = torch.tensor([question_ids], dtype=torch.long, device=loaded.device)
+            batch = {
+                "context_ids": context_tensor,
+                "question_ids": question_tensor,
+                "context_mask": torch.ones_like(context_tensor, dtype=torch.bool),
+                "question_mask": torch.ones_like(question_tensor, dtype=torch.bool),
+                "offsets": [tuple(offset) for offset in context_encoding["offset_mapping"]],
+            }
     else:
         if loaded.vocab is None:
             raise ValueError("Static QA inference requires a loaded vocabulary.")
@@ -213,27 +259,48 @@ def predict_answer(
         )
 
     with torch.inference_mode():
-        start_logits, end_logits = loaded.model(
-            context_ids=batch["context_ids"],
-            context_mask=batch["context_mask"],
-            question_ids=batch["question_ids"],
-            question_mask=batch["question_mask"],
-        )
+        if loaded.embedding_mode == "bert" and _uses_joint_bert_qa(loaded):
+            outputs = loaded.model(
+                input_ids=batch["input_ids"],
+                attention_mask=batch["attention_mask"],
+                token_type_ids=batch["token_type_ids"],
+            )
+            start_logits = outputs.start_logits
+            end_logits = outputs.end_logits
+            candidate_mask = batch["context_token_mask"][0].detach().cpu()
+            valid_length = None
+        else:
+            start_logits, end_logits = loaded.model(
+                context_ids=batch["context_ids"],
+                context_mask=batch["context_mask"],
+                question_ids=batch["question_ids"],
+                question_mask=batch["question_mask"],
+            )
+            candidate_mask = None
+            valid_length = int(batch["context_mask"][0].sum().item())
 
-    valid_length = int(batch["context_mask"][0].sum().item())
     start_index, end_index = select_best_span(
         start_logits[0].detach().cpu(),
         end_logits[0].detach().cpu(),
         valid_length=valid_length,
         max_answer_length=loaded.max_answer_length,
+        candidate_mask=candidate_mask,
     )
     answer_text = extract_answer_text(context, batch["offsets"], start_index, end_index)
     return {
         "answer": answer_text,
         "start_index": int(start_index),
         "end_index": int(end_index),
-        "context_tokens_used": valid_length,
-        "question_tokens_used": int(batch["question_mask"][0].sum().item()),
+        "context_tokens_used": (
+            int(batch["context_mask"][0].sum().item())
+            if "context_mask" in batch
+            else int(batch["context_tokens_used"])
+        ),
+        "question_tokens_used": (
+            int(batch["question_mask"][0].sum().item())
+            if "question_mask" in batch
+            else int(batch["question_tokens_used"])
+        ),
         "checkpoint_path": str(loaded.checkpoint_path),
         "embedding_mode": loaded.embedding_mode,
     }
@@ -265,14 +332,19 @@ def persist_qa_backbone(loaded: LoadedQAModel, *, root: Path | None = None) -> P
         or loaded.metadata.get("training_args", {}).get("bert_model_name")
         or "qa-backbone"
     )
+    saved_at = datetime.now(timezone.utc)
+    source_label = Path(source_name).name or source_name
+    target_name = f"{loaded.checkpoint_path.parent.name}__{saved_at.strftime('%Y%m%dT%H%M%SZ')}__{source_label}"
     return persist_pretrained_bundle(
         loaded.model.bert,
         loaded.tokenizer,
         source_name=source_name,
         namespace="qa_backbones",
         root=root,
+        target_name=target_name,
         extra_metadata={
             "task": "qa",
             "checkpoint_path": str(loaded.checkpoint_path),
+            "created_at_utc": saved_at.isoformat(),
         },
     )
