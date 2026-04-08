@@ -47,9 +47,18 @@ def persist_pretrained_bundle(
 ) -> Path:
     target_dir = bundle_dir(namespace=namespace, source_name=source_name, root=root)
     target_dir.mkdir(parents=True, exist_ok=True)
-    model.save_pretrained(target_dir)
-    if tokenizer is not None:
-        tokenizer.save_pretrained(target_dir)
+
+    # On Windows, repeatedly rewriting an already-loaded safetensors bundle can
+    # fail if another process still has a mapped view open. Reuse the cache once
+    # the bundle is present instead of overwriting it on every UI prediction.
+    if not bundle_config_exists(target_dir):
+        try:
+            model.save_pretrained(target_dir)
+        except OSError:
+            model.save_pretrained(target_dir, safe_serialization=False)
+
+        if tokenizer is not None:
+            tokenizer.save_pretrained(target_dir)
 
     metadata = {
         "label": source_name,
