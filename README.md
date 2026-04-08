@@ -3,7 +3,8 @@
 Datasets: https://drive.google.com/drive/folders/1NYBJmfx9RETVmYFXmHjYObUJQNuz7fZB?usp=sharing 
 
 # Task 1
-.venv\Scripts\python evaluate_sentiment140_bert.py --csv-path Sentiment140_v2.csv --max-rows 10000 --batch-size 64 --max-length 64 --output-dir outputs_task1_sentiment_5pct
+.venv\Scripts\python evaluate_sentiment140_bert.py --csv-path Sentiment140_v2.csv --model-name textattack/bert-base-uncased-SST-2 --max-rows 100000 --batch-size 64 --max-length 64 --output-dir outputs_task1_sentiment_100k
+
 
 # Task 2 - static
 .venv\Scripts\python -m qa_system.train --embedding-mode static --download-squad --train-limit 4380 --dev-limit 634 --epochs 2 --batch-size 16 --lowercase-static --output-dir outputs_task2_static_5pct_6pct
