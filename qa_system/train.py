@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import random
+from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
 
@@ -12,6 +13,8 @@ from torch.optim import AdamW
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer
 
+from UI.services.artifacts import write_json, write_run_manifest
+from UI.services.hf_store import persist_pretrained_bundle, resolve_load_source
 from qa_system.data import (
     PAD_IDX,
     QADataset,
@@ -130,7 +133,13 @@ def prepare_dataloaders(args: argparse.Namespace):
             "glove_hit_count": glove_hit_count,
         }
     else:
-        tokenizer = AutoTokenizer.from_pretrained(args.bert_model_name, use_fast=True)
+        project_root = Path(__file__).resolve().parents[1]
+        resolved_bert_source = resolve_load_source(
+            args.bert_model_name,
+            namespace="qa_backbones",
+            root=project_root,
+        )
+        tokenizer = AutoTokenizer.from_pretrained(resolved_bert_source, use_fast=True)
         train_features, skipped_train = build_bert_features(
             train_examples,
             tokenizer,
@@ -154,6 +163,8 @@ def prepare_dataloaders(args: argparse.Namespace):
         }
         extra_state = {
             "tokenizer_name": args.bert_model_name,
+            "resolved_bert_source": resolved_bert_source,
+            "tokenizer": tokenizer,
         }
 
     train_dataset = QADataset(train_features)
@@ -249,10 +260,15 @@ def evaluate(
 
 def train(args: argparse.Namespace) -> dict[str, object]:
     set_seed(args.seed)
+    project_root = Path(__file__).resolve().parents[1]
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     train_loader, dev_loader, model_kwargs, data_summary, extra_state = prepare_dataloaders(args)
 
-    model = BiDAFQuestionAnswering(**model_kwargs).to(device)
+    runtime_model_kwargs = dict(model_kwargs)
+    if args.embedding_mode == "bert":
+        runtime_model_kwargs["bert_model_name"] = str(extra_state.get("resolved_bert_source", args.bert_model_name))
+
+    model = BiDAFQuestionAnswering(**runtime_model_kwargs).to(device)
     optimizer = AdamW(
         [parameter for parameter in model.parameters() if parameter.requires_grad],
         lr=args.learning_rate,
@@ -305,8 +321,32 @@ def train(args: argparse.Namespace) -> dict[str, object]:
         )
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    serializable_extra_state = {key: value for key, value in extra_state.items() if key != "vocab"}
+    serializable_extra_state = {
+        key: value
+        for key, value in extra_state.items()
+        if key not in {"vocab", "tokenizer"}
+    }
+    training_args = {
+        key: str(value) if isinstance(value, Path) else value
+        for key, value in vars(args).items()
+    }
     checkpoint_path = args.output_dir / f"bidaf_{args.embedding_mode}.pt"
+    local_backbone_dir = None
+    if args.embedding_mode == "bert":
+        tokenizer = extra_state.get("tokenizer")
+        local_backbone_dir = persist_pretrained_bundle(
+            model.bert,
+            tokenizer,
+            source_name=args.bert_model_name,
+            namespace="qa_backbones",
+            root=project_root,
+            extra_metadata={
+                "task": "qa",
+                "saved_from_script": "qa_system.train",
+            },
+        )
+        serializable_extra_state["local_backbone_dir"] = str(local_backbone_dir.resolve())
+
     torch.save(
         {
             "model_state_dict": model.state_dict(),
@@ -314,6 +354,7 @@ def train(args: argparse.Namespace) -> dict[str, object]:
             "history": history,
             "data_summary": data_summary,
             "extra_state": serializable_extra_state,
+            "training_args": training_args,
         },
         checkpoint_path,
     )
@@ -325,6 +366,7 @@ def train(args: argparse.Namespace) -> dict[str, object]:
                 "history": history,
                 "data_summary": data_summary,
                 "extra_state": serializable_extra_state,
+                "training_args": training_args,
                 "device": str(device),
             },
             handle,
@@ -335,6 +377,45 @@ def train(args: argparse.Namespace) -> dict[str, object]:
         vocab_path = args.output_dir / "vocab_static.json"
         with vocab_path.open("w", encoding="utf-8") as handle:
             json.dump(extra_state["vocab"], handle, ensure_ascii=False, indent=2)
+    else:
+        vocab_path = None
+
+    write_json(args.output_dir / "run_config.json", training_args)
+    write_run_manifest(
+        args.output_dir,
+        {
+            "task": "qa",
+            "label": f"QA | {args.embedding_mode} | {args.output_dir.name}",
+            "run_name": args.output_dir.name,
+            "created_at_utc": datetime.now(timezone.utc).isoformat(),
+            "output_dir": args.output_dir,
+            "artifacts": {
+                "checkpoint_path": checkpoint_path,
+                "metrics_path": metrics_path,
+                "vocab_path": vocab_path,
+                "local_backbone_dir": local_backbone_dir,
+            },
+            "model": {
+                "embedding_mode": args.embedding_mode,
+                "model_kwargs": model_kwargs,
+                "resolved_bert_source": serializable_extra_state.get("resolved_bert_source"),
+                "tokenizer_name": serializable_extra_state.get("tokenizer_name"),
+            },
+            "dataset": {
+                "data_dir": args.data_dir,
+                "train_file": args.train_file,
+                "dev_file": args.dev_file,
+                "download_squad": args.download_squad,
+                "train_limit": args.train_limit,
+                "dev_limit": args.dev_limit,
+            },
+            "training_args": training_args,
+            "data_summary": data_summary,
+            "runtime": {
+                "device": str(device),
+            },
+        },
+    )
 
     return {
         "checkpoint_path": str(checkpoint_path),
@@ -342,6 +423,7 @@ def train(args: argparse.Namespace) -> dict[str, object]:
         "history": history,
         "data_summary": data_summary,
         "device": str(device),
+        "run_manifest_path": str((args.output_dir / "run_manifest.json").resolve()),
     }
 
 

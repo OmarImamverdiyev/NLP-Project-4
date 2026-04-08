@@ -38,6 +38,7 @@ This repository now contains two assignment deliverables:
 - [Task 1 analysis](task1_sentiment_analysis.md): answers for the BERT sentiment-analysis questions
 - [Task 2 report](task2_reading_comprehension_report.md): architecture notes, evaluation setup, and smoke-test results
 - `qa_system/`: a PyTorch implementation of a BiDAF-style reading-comprehension system with either static word embeddings or contextual BERT embeddings
+- `UI/`: a Streamlit dashboard for viewing saved results, previewing commands, and testing saved models without rebuilding the whole pipeline each time
 
 ## Task 2 overview
 
@@ -72,6 +73,30 @@ You can also install directly into your active environment:
 ```bash
 pip install -r requirements.txt
 ```
+
+## UI Dashboard
+
+The UI is intentionally separate from the training dependencies so the existing CLI workflow stays intact.
+
+Install the dashboard dependency:
+
+```bash
+pip install -r UI/requirements.txt
+```
+
+Launch the dashboard:
+
+```bash
+streamlit run UI/app.py
+```
+
+What it provides:
+
+- automatic discovery of saved Task 1 and Task 2 runs
+- local model-bundle reuse under `UI/artifacts/model_store/`
+- interactive sentiment testing
+- interactive QA checkpoint testing
+- command builders for future training and evaluation runs
 
 ## Run with static embeddings
 

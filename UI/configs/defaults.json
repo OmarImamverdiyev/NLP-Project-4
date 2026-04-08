@@ -1,0 +1,67 @@
+{
+  "sentiment_models": [
+    {
+      "label": "English SST-2 BERT",
+      "value": "textattack/bert-base-uncased-SST-2",
+      "language": "English",
+      "notes": "Binary English sentiment model built on bert-base-uncased."
+    },
+    {
+      "label": "Azerbaijani Sentiment BERT",
+      "value": "StartZer0/az-sentiment-bert",
+      "language": "Azerbaijani",
+      "notes": "Azerbaijani sentiment model suitable for agglutinative-language experiments."
+    }
+  ],
+  "qa_backbones": [
+    {
+      "label": "BERT Base Uncased",
+      "value": "bert-base-uncased",
+      "notes": "Default English BERT-Base backbone for QA."
+    },
+    {
+      "label": "Multilingual BERT Cased",
+      "value": "bert-base-multilingual-cased",
+      "notes": "Useful when you want multilingual or Azerbaijani-friendly tokenization."
+    },
+    {
+      "label": "XLM-R Base",
+      "value": "xlm-roberta-base",
+      "notes": "Strong multilingual alternative for agglutinative languages."
+    }
+  ],
+  "datasets": {
+    "sentiment": [
+      {
+        "label": "Sentiment140_v2.csv",
+        "path": "Sentiment140_v2.csv",
+        "label_column": "polarity",
+        "text_column": "text"
+      },
+      {
+        "label": "dataset_balanced_100k.csv",
+        "path": "dataset_balanced_100k.csv",
+        "label_column": "polarity",
+        "text_column": "text"
+      },
+      {
+        "label": "dataset.csv (Azerbaijani)",
+        "path": "dataset.csv",
+        "label_column": "label",
+        "text_column": "text"
+      }
+    ],
+    "qa_train": [
+      {
+        "label": "SQuAD train-v1.1",
+        "path": "data/train-v1.1.json"
+      }
+    ],
+    "qa_dev": [
+      {
+        "label": "SQuAD dev-v1.1",
+        "path": "data/dev-v1.1.json"
+      }
+    ]
+  }
+}

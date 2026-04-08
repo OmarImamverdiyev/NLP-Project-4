@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import argparse
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 import torch
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
+
+from UI.services.artifacts import write_run_manifest
+from UI.services.hf_store import persist_pretrained_bundle, resolve_load_source
 
 
 DEFAULT_MODEL = "StartZer0/az-sentiment-bert"
@@ -76,9 +80,11 @@ def load_texts(args: argparse.Namespace) -> list[str]:
 def main() -> None:
     args = parse_args()
     texts = load_texts(args)
+    project_root = Path(__file__).resolve().parents[1]
 
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name)
-    model = AutoModelForSequenceClassification.from_pretrained(args.model_name)
+    resolved_model_source = resolve_load_source(args.model_name, namespace="sentiment", root=project_root)
+    tokenizer = AutoTokenizer.from_pretrained(resolved_model_source)
+    model = AutoModelForSequenceClassification.from_pretrained(resolved_model_source)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
     model.eval()
@@ -112,6 +118,7 @@ def main() -> None:
 
     payload = {
         "model_name": args.model_name,
+        "resolved_model_source": resolved_model_source,
         "device": str(device),
         "num_labels": int(model.config.num_labels),
         "id2label": {str(key): value for key, value in model.config.id2label.items()},
@@ -119,9 +126,45 @@ def main() -> None:
         "tokenizer_model_max_length": getattr(tokenizer, "model_max_length", None),
         "predictions": results,
     }
+    local_model_dir = persist_pretrained_bundle(
+        model,
+        tokenizer,
+        source_name=args.model_name,
+        namespace="sentiment",
+        root=project_root,
+        extra_metadata={
+            "task": "sentiment",
+            "saved_from_script": "task1_extended/predict_az_sentiment.py",
+        },
+    )
+    payload["local_model_dir"] = str(local_model_dir.resolve())
 
     args.output_file.parent.mkdir(parents=True, exist_ok=True)
     args.output_file.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    write_run_manifest(
+        args.output_file.parent,
+        {
+            "task": "sentiment",
+            "label": f"Azerbaijani sentiment sample | {args.model_name}",
+            "run_name": args.output_file.parent.name,
+            "created_at_utc": datetime.now(timezone.utc).isoformat(),
+            "output_dir": args.output_file.parent,
+            "artifacts": {
+                "predictions_path": args.output_file,
+                "local_model_dir": local_model_dir,
+            },
+            "model": {
+                "source_name": args.model_name,
+                "resolved_source": resolved_model_source,
+                "local_model_dir": local_model_dir,
+                "num_labels": int(model.config.num_labels),
+            },
+            "runtime": {
+                "max_length": args.max_length,
+                "device": str(device),
+            },
+        },
+    )
 
     print(json.dumps(payload, indent=2, ensure_ascii=False))
     print(f"\nSaved predictions to: {args.output_file}")

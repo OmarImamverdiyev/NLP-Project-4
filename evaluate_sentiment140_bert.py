@@ -5,10 +5,14 @@ import csv
 import json
 import random
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import torch
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
+
+from UI.services.artifacts import write_json, write_run_manifest
+from UI.services.hf_store import persist_pretrained_bundle, resolve_load_source
 
 
 def parse_args() -> argparse.Namespace:
@@ -198,13 +202,15 @@ def classification_report(gold_labels: list[int], predicted_labels: list[int]) -
 def main() -> None:
     args = parse_args()
     set_seed(args.seed)
+    project_root = Path(__file__).resolve().parent
 
     started = time.time()
     all_examples, class_counts = load_examples(args.csv_path, args.label_column, args.text_column)
     sampled_examples = sample_examples(all_examples, args.max_rows, args.seed)
 
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name, use_fast=True)
-    model = AutoModelForSequenceClassification.from_pretrained(args.model_name)
+    resolved_model_source = resolve_load_source(args.model_name, namespace="sentiment", root=project_root)
+    tokenizer = AutoTokenizer.from_pretrained(resolved_model_source, use_fast=True)
+    model = AutoModelForSequenceClassification.from_pretrained(resolved_model_source)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
     model.eval()
@@ -263,6 +269,7 @@ def main() -> None:
 
     results = {
         "model_name": args.model_name,
+        "resolved_model_source": resolved_model_source,
         "dataset": str(args.csv_path),
         "evaluated_at_unix": int(time.time()),
         "runtime_seconds": round(time.time() - started, 2),
@@ -301,10 +308,72 @@ def main() -> None:
     }
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
+    local_model_dir = persist_pretrained_bundle(
+        model,
+        tokenizer,
+        source_name=args.model_name,
+        namespace="sentiment",
+        root=project_root,
+        extra_metadata={
+            "task": "sentiment",
+            "saved_from_script": "evaluate_sentiment140_bert.py",
+        },
+    )
+    results["local_model_dir"] = str(local_model_dir.resolve())
+
     model_slug = args.model_name.replace("/", "__")
     metrics_path = args.output_dir / f"metrics_{model_slug}.json"
     with metrics_path.open("w", encoding="utf-8") as handle:
         json.dump(results, handle, indent=2, ensure_ascii=False)
+
+    run_config = {
+        "csv_path": args.csv_path,
+        "model_name": args.model_name,
+        "resolved_model_source": resolved_model_source,
+        "output_dir": args.output_dir,
+        "label_column": args.label_column,
+        "text_column": args.text_column,
+        "batch_size": args.batch_size,
+        "max_rows": args.max_rows,
+        "max_length": args.max_length,
+        "seed": args.seed,
+    }
+    write_json(args.output_dir / "run_config.json", run_config)
+    write_run_manifest(
+        args.output_dir,
+        {
+            "task": "sentiment",
+            "label": f"Sentiment | {args.model_name}",
+            "run_name": args.output_dir.name,
+            "created_at_utc": datetime.now(timezone.utc).isoformat(),
+            "output_dir": args.output_dir,
+            "artifacts": {
+                "metrics_path": metrics_path,
+                "local_model_dir": local_model_dir,
+            },
+            "model": {
+                "source_name": args.model_name,
+                "resolved_source": resolved_model_source,
+                "local_model_dir": local_model_dir,
+                "num_labels": int(model.config.num_labels),
+                "id2label": {str(key): value for key, value in model.config.id2label.items()},
+                "tokenizer_do_lower_case": tokenizer_lowercases,
+            },
+            "dataset": {
+                "path": args.csv_path,
+                "label_column": args.label_column,
+                "text_column": args.text_column,
+                "max_rows": args.max_rows,
+            },
+            "runtime": {
+                "batch_size": args.batch_size,
+                "max_length": args.max_length,
+                "seed": args.seed,
+                "device": str(device),
+                "runtime_seconds": round(time.time() - started, 2),
+            },
+        },
+    )
 
     print(json.dumps(results, indent=2, ensure_ascii=False))
     print(f"\nSaved metrics to: {metrics_path}")
