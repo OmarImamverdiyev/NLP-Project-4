@@ -152,6 +152,9 @@ python -m qa_system.train --embedding-mode static --download-squad --train-limit
 python -m qa_system.train --embedding-mode bert --download-squad --freeze-bert --train-limit 2000 --dev-limit 500 --epochs 2 --batch-size 4 --context-max-length 128 --question-max-length 32
 ```
 
+python -m qa_system.train --embedding-mode bert --download-squad --freeze-bert --train-limit 20000 --dev-limit 500 --epochs 2 --batch-size 4 --context-max-length 192 --question-max-length 32 --output-dir outputs_task2_bert_20k_ctx192
+
+
 Then compare `dev_exact_match` and `dev_f1` in the saved metrics JSON files.
 
 ## Azerbaijani note
