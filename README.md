@@ -1,5 +1,7 @@
 # NLP Project 5
 
+Datasets: https://drive.google.com/drive/folders/1NYBJmfx9RETVmYFXmHjYObUJQNuz7fZB?usp=sharing
+
 This repository now contains two assignment deliverables:
 
 - [Task 1 analysis](task1_sentiment_analysis.md): answers for the BERT sentiment-analysis questions
