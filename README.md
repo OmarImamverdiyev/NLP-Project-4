@@ -10,6 +10,10 @@ Datasets: https://drive.google.com/drive/folders/1NYBJmfx9RETVmYFXmHjYObUJQNuz7f
 # Test if CUDA exists
 .venv\Scripts\python -c "import torch; print('cuda_available =', torch.cuda.is_available()); print('gpu =', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'NONE')"
 
+nvidia-smi
+
+python -c "import torch; print(torch.__version__); print('torch.version.cuda =', torch.version.cuda)"
+
 
 # Task 1 - Azeri Model
 ```bash
