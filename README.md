@@ -11,6 +11,7 @@ Datasets: https://drive.google.com/drive/folders/1NYBJmfx9RETVmYFXmHjYObUJQNuz7f
 ```bash
 .venv\Scripts\python evaluate_sentiment140_bert.py --csv-path dataset.csv --label-column label --text-column text --model-name StartZer0/az-sentiment-bert --max-rows 100000 --batch-size 64 --max-length 64 --output-dir outputs_task1_extended_az_dataset_100k
 
+
 ```
 
 # Task 2 - static
