@@ -26,4 +26,6 @@ UI/artifacts/model_store/
 UI/artifacts/logs/
 
 # Embeddings
-glove/
+glove/glove.6B.50d.txt
+glove/*.txt
+glove/*.zip

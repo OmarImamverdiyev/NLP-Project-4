@@ -131,7 +131,74 @@ def resolve_data_files(args: argparse.Namespace) -> tuple[Path, Path]:
     return train_file, dev_file
 
 
+def discover_glove_candidates(project_root: Path, embedding_dim: int | None = None) -> list[Path]:
+    glove_dir = project_root / "glove"
+    if not glove_dir.exists():
+        return []
+
+    patterns = [f"*{embedding_dim}d.txt"] if embedding_dim is not None else ["*.txt"]
+    candidates: list[Path] = []
+    for pattern in patterns:
+        candidates.extend(sorted(glove_dir.glob(pattern)))
+    return [path for path in candidates if path.is_file()]
+
+
+def format_glove_suggestion(project_root: Path, embedding_dim: int) -> str:
+    candidates = discover_glove_candidates(project_root, embedding_dim=embedding_dim)
+    if not candidates:
+        return ""
+
+    relative_paths = []
+    for candidate in candidates[:4]:
+        try:
+            relative_paths.append(str(candidate.relative_to(project_root)))
+        except ValueError:
+            relative_paths.append(str(candidate))
+
+    example = relative_paths[0]
+    available = ", ".join(relative_paths)
+    return (
+        f" Try `--glove-path {example}`."
+        f" Available local candidates: {available}."
+    )
+
+
+def resolve_glove_path(glove_path: Path, project_root: Path, embedding_dim: int) -> Path:
+    raw_path = str(glove_path)
+    normalized_path = raw_path.replace("\\", "/").lower()
+    suggestion = format_glove_suggestion(project_root, embedding_dim)
+
+    if normalized_path.startswith("path/to/"):
+        raise FileNotFoundError(
+            f"`--glove-path` is still using the placeholder path '{glove_path}'."
+            f" Replace it with the real location of your GloVe file.{suggestion}"
+        )
+
+    resolved_path = glove_path.expanduser()
+    if not resolved_path.is_absolute():
+        resolved_path = (project_root / resolved_path).resolve()
+
+    if not resolved_path.exists():
+        raise FileNotFoundError(
+            f"GloVe file not found: '{glove_path}' (resolved to '{resolved_path}').{suggestion}"
+        )
+
+    return resolved_path
+
+
+def build_manifest_model_kwargs(model_kwargs: dict[str, object]) -> dict[str, object]:
+    serializable_model_kwargs = dict(model_kwargs)
+    pretrained_embeddings = serializable_model_kwargs.get("pretrained_embeddings")
+    if torch.is_tensor(pretrained_embeddings):
+        serializable_model_kwargs["pretrained_embeddings"] = {
+            "stored_in_checkpoint": True,
+            "shape": list(pretrained_embeddings.shape),
+        }
+    return serializable_model_kwargs
+
+
 def prepare_dataloaders(args: argparse.Namespace):
+    project_root = Path(__file__).resolve().parents[1]
     train_file, dev_file = resolve_data_files(args)
     train_examples = load_squad_examples(train_file, limit=args.train_limit)
     dev_examples = load_squad_examples(dev_file, limit=args.dev_limit)
@@ -146,8 +213,13 @@ def prepare_dataloaders(args: argparse.Namespace):
         pretrained_embeddings = None
         glove_hit_count = 0
         if args.glove_path is not None:
-            pretrained_embeddings, glove_hit_count = load_glove_subset(
+            resolved_glove_path = resolve_glove_path(
                 args.glove_path,
+                project_root=project_root,
+                embedding_dim=args.embedding_dim,
+            )
+            pretrained_embeddings, glove_hit_count = load_glove_subset(
+                resolved_glove_path,
                 vocab,
                 args.embedding_dim,
             )
@@ -179,9 +251,9 @@ def prepare_dataloaders(args: argparse.Namespace):
         extra_state = {
             "vocab": vocab,
             "glove_hit_count": glove_hit_count,
+            "glove_path": str(resolved_glove_path) if args.glove_path is not None else None,
         }
     else:
-        project_root = Path(__file__).resolve().parents[1]
         resolved_bert_source = resolve_load_source(
             args.bert_model_name,
             namespace="qa_backbones",
@@ -523,6 +595,7 @@ def train(args: argparse.Namespace) -> dict[str, object]:
         vocab_path = None
 
     write_json(args.output_dir / "run_config.json", training_args)
+    manifest_model_kwargs = build_manifest_model_kwargs(model_kwargs)
     write_run_manifest(
         args.output_dir,
         {
@@ -539,7 +612,7 @@ def train(args: argparse.Namespace) -> dict[str, object]:
             },
             "model": {
                 "embedding_mode": args.embedding_mode,
-                "model_kwargs": model_kwargs,
+                "model_kwargs": manifest_model_kwargs,
                 "resolved_bert_source": serializable_extra_state.get("resolved_bert_source"),
                 "tokenizer_name": serializable_extra_state.get("tokenizer_name"),
             },

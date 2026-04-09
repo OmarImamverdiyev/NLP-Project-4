@@ -4,6 +4,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 
 IGNORED_PARTS = {
@@ -44,8 +45,11 @@ def load_json(path: str | Path, default: Any = None) -> Any:
     file_path = Path(path)
     if not file_path.exists():
         return default
-    with file_path.open("r", encoding="utf-8") as handle:
-        return json.load(handle)
+    try:
+        with file_path.open("r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        return default
 
 
 def sanitize_for_json(value: Any) -> Any:
@@ -61,8 +65,14 @@ def sanitize_for_json(value: Any) -> Any:
 def write_json(path: str | Path, payload: Any) -> Path:
     file_path = Path(path)
     file_path.parent.mkdir(parents=True, exist_ok=True)
-    with file_path.open("w", encoding="utf-8") as handle:
-        json.dump(sanitize_for_json(payload), handle, indent=2, ensure_ascii=False)
+    temp_path = file_path.with_name(f".{file_path.name}.{uuid4().hex}.tmp")
+    try:
+        with temp_path.open("w", encoding="utf-8") as handle:
+            json.dump(sanitize_for_json(payload), handle, indent=2, ensure_ascii=False)
+        temp_path.replace(file_path)
+    finally:
+        if temp_path.exists():
+            temp_path.unlink()
     return file_path
 
 
@@ -152,11 +162,25 @@ def _build_legacy_record(metrics_path: Path) -> RunRecord:
     )
 
 
-def _build_manifest_record(manifest_path: Path) -> RunRecord:
+def _build_manifest_record(manifest_path: Path) -> RunRecord | None:
     payload = load_json(manifest_path, default={}) or {}
+    if not isinstance(payload, dict):
+        return None
+
+    artifacts = payload.get("artifacts")
+    if not isinstance(artifacts, dict):
+        return None
+
+    task = payload.get("task")
+    if not task:
+        return None
+
+    output_dir_value = payload.get("output_dir")
+    if not output_dir_value:
+        return None
+
     task = str(payload.get("task", "unknown"))
-    output_dir = Path(payload.get("output_dir", manifest_path.parent)).resolve()
-    artifacts = payload.get("artifacts", {})
+    output_dir = Path(output_dir_value).resolve()
     metrics_path = artifacts.get("metrics_path")
     checkpoint_path = artifacts.get("checkpoint_path")
     label = str(payload.get("label") or payload.get("run_name") or output_dir.name)
@@ -180,6 +204,8 @@ def discover_run_records(root: Path | None = None) -> list[RunRecord]:
         if is_ignored_path(manifest_path):
             continue
         record = _build_manifest_record(manifest_path)
+        if record is None:
+            continue
         manifest_records[record.output_dir] = record
 
     for metrics_path in search_root.rglob("metrics*.json"):

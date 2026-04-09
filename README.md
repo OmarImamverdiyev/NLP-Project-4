@@ -109,7 +109,7 @@ python -m qa_system.train --embedding-mode static --download-squad --train-limit
 If you want a more traditional baseline, you can initialize the static embedding layer with GloVe:
 
 ```bash
-python -m qa_system.train --embedding-mode static --download-squad --glove-path path/to/glove.6B.100d.txt --embedding-dim 100 --lowercase-static
+python -m qa_system.train --embedding-mode static --download-squad --glove-path glove/glove.6B.100d.txt --embedding-dim 100 --lowercase-static
 ```
 
 ## Run with BERT embeddings
