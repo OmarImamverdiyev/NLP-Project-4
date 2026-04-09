@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import re
 import json
 import random
 import time
@@ -73,6 +74,11 @@ def parse_args() -> argparse.Namespace:
         default=42,
         help="Random seed for sampling.",
     )
+    parser.add_argument(
+        "--strip-html-breaks",
+        action="store_true",
+        help="Replace HTML <br> tags with spaces before evaluation.",
+    )
     return parser.parse_args()
 
 
@@ -84,18 +90,32 @@ def set_seed(seed: int) -> None:
 
 
 def normalize_label(raw_label: str) -> int | None:
-    value = raw_label.strip()
-    if value == "0":
+    value = raw_label.strip().lower()
+    if value in {"0", "negative", "neg"}:
         return 0
-    if value == "4":
+    if value in {"1", "4", "positive", "pos"}:
         return 1
     return None
+
+
+HTML_BREAK_PATTERN = re.compile(r"(?:<br\s*/?>)+", flags=re.IGNORECASE)
+WHITESPACE_PATTERN = re.compile(r"\s+")
+
+
+def normalize_text(raw_text: str, *, strip_html_breaks: bool) -> str:
+    text = raw_text.strip()
+    if strip_html_breaks:
+        text = HTML_BREAK_PATTERN.sub(" ", text)
+    text = WHITESPACE_PATTERN.sub(" ", text)
+    return text.strip()
 
 
 def load_examples(
     csv_path: Path,
     label_column: str,
     text_column: str,
+    *,
+    strip_html_breaks: bool,
 ) -> tuple[list[tuple[int, str]], dict[str, int]]:
     examples: list[tuple[int, str]] = []
     skipped = 0
@@ -104,7 +124,10 @@ def load_examples(
         reader = csv.DictReader(handle)
         for row in reader:
             label = normalize_label(row.get(label_column, ""))
-            text = (row.get(text_column, "") or "").strip()
+            text = normalize_text(
+                row.get(text_column, "") or "",
+                strip_html_breaks=strip_html_breaks,
+            )
             if label is None or not text:
                 skipped += 1
                 continue
@@ -205,7 +228,12 @@ def main() -> None:
     project_root = Path(__file__).resolve().parent
 
     started = time.time()
-    all_examples, class_counts = load_examples(args.csv_path, args.label_column, args.text_column)
+    all_examples, class_counts = load_examples(
+        args.csv_path,
+        args.label_column,
+        args.text_column,
+        strip_html_breaks=args.strip_html_breaks,
+    )
     sampled_examples = sample_examples(all_examples, args.max_rows, args.seed)
 
     resolved_model_source = resolve_load_source(args.model_name, namespace="sentiment", root=project_root)
@@ -275,8 +303,8 @@ def main() -> None:
         "runtime_seconds": round(time.time() - started, 2),
         "device": str(device),
         "label_mapping": {
-            "dataset_negative": 0,
-            "dataset_positive": 4,
+            "dataset_negative": ["0", "negative"],
+            "dataset_positive": ["1", "4", "positive"],
             "normalized_negative": 0,
             "normalized_positive": 1,
         },
@@ -297,6 +325,7 @@ def main() -> None:
             "max_length_used_for_eval": args.max_length,
             "tokenizer_model_max_length": tokenizer_model_max_length,
             "tokenizer_do_lower_case": tokenizer_lowercases,
+            "strip_html_breaks": args.strip_html_breaks,
         },
         "tokenization_summary": {
             "average_tokenized_length": round(avg_token_length, 2),
