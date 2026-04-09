@@ -122,6 +122,23 @@ def load_examples(
 
     with csv_path.open("r", encoding="utf-8", errors="replace", newline="") as handle:
         reader = csv.DictReader(handle)
+        fieldnames = list(reader.fieldnames or [])
+        if not fieldnames:
+            raise ValueError(f"CSV file '{csv_path}' is missing a header row.")
+
+        missing_columns = [
+            column_name
+            for column_name in (label_column, text_column)
+            if column_name not in fieldnames
+        ]
+        if missing_columns:
+            available_columns = ", ".join(fieldnames)
+            missing_list = ", ".join(missing_columns)
+            raise ValueError(
+                f"CSV file '{csv_path}' is missing required column(s): {missing_list}. "
+                f"Available columns: {available_columns}."
+            )
+
         for row in reader:
             label = normalize_label(row.get(label_column, ""))
             text = normalize_text(
@@ -138,6 +155,11 @@ def load_examples(
         "positive_rows": sum(1 for label, _ in examples if label == 1),
         "skipped_rows": skipped,
     }
+    if not examples:
+        raise ValueError(
+            f"CSV file '{csv_path}' did not produce any usable examples after filtering. "
+            "Check the label/text columns and ensure labels use one of: 0, 1, 4, negative, positive, neg, pos."
+        )
     return examples, class_counts
 
 
