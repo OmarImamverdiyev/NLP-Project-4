@@ -1,0 +1,29 @@
+# Virtual environments
+venv/
+.venv/
+UI/venv/
+
+# Python cache
+__pycache__/
+*/__pycache__/
+*.pyc
+
+# Data files
+data/
+*.csv
+dataset.csv
+dataset_balanced_100k.csv
+IMDB_Dataset.csv
+
+# ML outputs
+outputs/
+outputs_*/
+
+# Artifacts / models
+artifacts/
+UI/artifacts/
+UI/artifacts/model_store/
+UI/artifacts/logs/
+
+# Embeddings
+glove/
